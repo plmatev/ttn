@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/TheThingsNetwork/api/logfields"
 	pb_lorawan "github.com/TheThingsNetwork/api/protocol/lorawan"
 	router_pb "github.com/TheThingsNetwork/api/router"
 	ttnlog "github.com/TheThingsNetwork/go-utils/log"
@@ -37,8 +38,8 @@ type Schedule interface {
 // NewSchedule creates a new Schedule
 func NewSchedule(ctx ttnlog.Interface) Schedule {
 	s := &schedule{
-		ctx:   ctx,
-		items: make(map[string]*scheduledItem),
+		ctx:                   ctx,
+		items:                 make(map[string]*scheduledItem),
 		downlinkSubscriptions: make(map[string]chan *router_pb.DownlinkMessage),
 	}
 	go func() {
@@ -75,12 +76,11 @@ type schedule struct {
 	offset int64 // should be on top to ensure memory alignment needed for sync/atomic
 
 	sync.RWMutex
-	ctx                       ttnlog.Interface
-	items                     map[string]*scheduledItem
-	downlink                  chan *router_pb.DownlinkMessage
-	downlinkSubscriptionsLock sync.RWMutex
-	downlinkSubscriptions     map[string]chan *router_pb.DownlinkMessage
-	gateway                   *Gateway
+	ctx                   ttnlog.Interface
+	items                 map[string]*scheduledItem
+	downlink              chan *router_pb.DownlinkMessage
+	downlinkSubscriptions map[string]chan *router_pb.DownlinkMessage
+	gateway               *Gateway
 }
 
 func (s *schedule) GoString() (str string) {
@@ -94,7 +94,7 @@ func (s *schedule) GoString() (str string) {
 
 // Deadline for sending a downlink back to the gateway
 // TODO: Make configurable
-var Deadline = 800 * time.Millisecond
+var Deadline = 1000 * time.Millisecond
 
 const uintmax = 1 << 32
 
@@ -162,14 +162,18 @@ func (s *schedule) GetOption(timestamp uint32, length uint32) (id string, score 
 
 // see interface
 func (s *schedule) Schedule(id string, downlink *router_pb.DownlinkMessage) error {
-	ctx := s.ctx.WithField("Identifier", id)
+	ctx := s.ctx.WithFields(logfields.ForMessage(downlink)).WithFields(ttnlog.Fields{
+		"Identifier": id,
+		"TxPower":    downlink.GatewayConfiguration.Power,
+	})
 
 	s.Lock()
 	defer s.Unlock()
 	if item, ok := s.items[id]; ok {
 		item.payload = downlink
 
-		if lorawan := downlink.GetProtocolConfiguration().GetLoRaWAN(); lorawan != nil {
+		conf := downlink.GetProtocolConfiguration()
+		if lorawan := conf.GetLoRaWAN(); lorawan != nil {
 			var time time.Duration
 			if lorawan.Modulation == pb_lorawan.Modulation_LORA {
 				// Calculate max ToA
@@ -193,13 +197,13 @@ func (s *schedule) Schedule(id string, downlink *router_pb.DownlinkMessage) erro
 			// Schedule transmission before the Deadline
 			go func() {
 				waitTime := item.deadlineAt.Sub(time.Now())
-				ctx.WithField("Remaining", waitTime).Info("Scheduled downlink")
+				ctx.WithField("Remaining", waitTime).Debug("Scheduled downlink")
 				downlink.Trace = downlink.Trace.WithEvent("schedule", "duration", waitTime)
 				<-time.After(waitTime)
 				s.RLock()
 				defer s.RUnlock()
 				if s.downlink != nil {
-					ctx.Debug("Send Downlink")
+					ctx.Info("Send Downlink")
 					s.downlink <- item.payload
 				}
 			}()
@@ -210,7 +214,7 @@ func (s *schedule) Schedule(id string, downlink *router_pb.DownlinkMessage) erro
 				if s.downlink != nil {
 					overdue := time.Now().Sub(item.deadlineAt)
 					if overdue < Deadline {
-						ctx.WithField("Overdue", overdue).Debug("Send Downlink")
+						ctx.Info("Send Downlink")
 						s.downlink <- item.payload
 					} else {
 						ctx.WithField("Overdue", overdue).Warn("Discard Late Downlink")
@@ -227,22 +231,23 @@ func (s *schedule) Schedule(id string, downlink *router_pb.DownlinkMessage) erro
 }
 
 func (s *schedule) Stop(subscriptionID string) {
-	s.downlinkSubscriptionsLock.Lock()
-	defer s.downlinkSubscriptionsLock.Unlock()
+	s.Lock()
+	defer s.Unlock()
 	if sub, ok := s.downlinkSubscriptions[subscriptionID]; ok {
 		close(sub)
 		delete(s.downlinkSubscriptions, subscriptionID)
 	}
 	if len(s.downlinkSubscriptions) == 0 {
-		s.Lock()
-		defer s.Unlock()
-		close(s.downlink)
-		s.downlink = nil
+		if s.downlink != nil {
+			close(s.downlink)
+			s.downlink = nil
+		}
 	}
 }
 
 func (s *schedule) Subscribe(subscriptionID string) <-chan *router_pb.DownlinkMessage {
 	s.Lock()
+	defer s.Unlock()
 	if s.downlink == nil {
 		s.downlink = make(chan *router_pb.DownlinkMessage)
 		go func() {
@@ -250,27 +255,24 @@ func (s *schedule) Subscribe(subscriptionID string) <-chan *router_pb.DownlinkMe
 				if s.gateway != nil && s.gateway.Utilization != nil {
 					s.gateway.Utilization.AddTx(downlink) // FIXME: Issue #420
 				}
-				s.downlinkSubscriptionsLock.RLock()
-				for _, ch := range s.downlinkSubscriptions {
+				s.RLock()
+				for subscriptionID, ch := range s.downlinkSubscriptions {
 					select {
 					case ch <- downlink:
 					default:
 						s.ctx.WithField("SubscriptionID", subscriptionID).Warn("Could not send downlink message")
 					}
 				}
-				s.downlinkSubscriptionsLock.RUnlock()
+				s.RUnlock()
 			}
 		}()
 	}
-	s.Unlock()
 
-	s.downlinkSubscriptionsLock.Lock()
 	if _, ok := s.downlinkSubscriptions[subscriptionID]; ok {
 		return nil
 	}
 	sub := make(chan *router_pb.DownlinkMessage)
 	s.downlinkSubscriptions[subscriptionID] = sub
-	s.downlinkSubscriptionsLock.Unlock()
 
 	return sub
 }

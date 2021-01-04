@@ -41,10 +41,12 @@ func (n *networkServerManager) getDevice(ctx context.Context, in *pb_lorawan.Dev
 	if err != nil {
 		return nil, err
 	}
-	if n.clientRate.Limit(claims.Subject) {
-		return nil, grpc.Errorf(codes.ResourceExhausted, "Rate limit for client reached")
+	if wait, ok := n.clientRate.WaitMaxDuration(claims.Subject, 500*time.Millisecond); ok {
+		time.Sleep(wait)
+	} else {
+		return nil, grpc.Errorf(codes.ResourceExhausted, "Rate limit for client %q reached", claims.Subject)
 	}
-	dev, err := n.networkServer.devices.Get(*in.AppEUI, *in.DevEUI)
+	dev, err := n.networkServer.devices.Get(in.AppEUI, in.DevEUI)
 	if err != nil {
 		return nil, err
 	}
@@ -68,9 +70,9 @@ func (n *networkServerManager) GetDevice(ctx context.Context, in *pb_lorawan.Dev
 
 	return &pb_lorawan.Device{
 		AppID:            dev.AppID,
-		AppEUI:           &dev.AppEUI,
+		AppEUI:           dev.AppEUI,
 		DevID:            dev.DevID,
-		DevEUI:           &dev.DevEUI,
+		DevEUI:           dev.DevEUI,
 		DevAddr:          &dev.DevAddr,
 		NwkSKey:          &dev.NwkSKey,
 		FCntUp:           dev.FCntUp,
@@ -107,9 +109,9 @@ func (n *networkServerManager) SetDevice(ctx context.Context, in *pb_lorawan.Dev
 	}
 
 	dev.AppID = in.AppID
-	dev.AppEUI = *in.AppEUI
+	dev.AppEUI = in.AppEUI
 	dev.DevID = in.DevID
-	dev.DevEUI = *in.DevEUI
+	dev.DevEUI = in.DevEUI
 	dev.FCntUp = in.FCntUp
 	dev.FCntDown = in.FCntDown
 	dev.ADR = device.ADRSettings{Band: dev.ADR.Band, Margin: dev.ADR.Margin}
@@ -147,7 +149,7 @@ func (n *networkServerManager) DeleteDevice(ctx context.Context, in *pb_lorawan.
 	if err != nil {
 		return nil, err
 	}
-	err = n.networkServer.devices.Delete(*in.AppEUI, *in.DevEUI)
+	err = n.networkServer.devices.Delete(in.AppEUI, in.DevEUI)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +175,7 @@ func (n *networkServerManager) GetDevAddr(ctx context.Context, in *pb_lorawan.De
 		return nil, err
 	}
 	return &pb_lorawan.DevAddrResponse{
-		DevAddr: &devAddr,
+		DevAddr: devAddr,
 	}, nil
 }
 
@@ -195,7 +197,7 @@ func (n *networkServerManager) GetStatus(ctx context.Context, in *pb.StatusReque
 func (n *networkServer) RegisterManager(s *grpc.Server) {
 	server := &networkServerManager{networkServer: n}
 
-	server.clientRate = ratelimit.NewRegistry(5000, time.Hour)
+	server.clientRate = ratelimit.NewRegistry(5, time.Second)
 
 	pb.RegisterNetworkServerManagerServer(s, server)
 	pb_lorawan.RegisterDeviceManagerServer(s, server)

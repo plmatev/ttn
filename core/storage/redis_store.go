@@ -27,7 +27,20 @@ func NewRedisStore(client *redis.Client, prefix string) *RedisStore {
 }
 
 // Keys matching the selector, prepending the prefix to the selector if necessary
-func (s *RedisStore) Keys(selector string) ([]string, error) {
+func (s *RedisStore) Keys(selector string, opts *ListOptions) ([]string, error) {
+	if opts != nil && opts.cacheKey != "" {
+		cacheExists, err := s.client.Exists(opts.cacheKey).Result()
+		if err != nil {
+			return nil, err
+		}
+		if cacheExists {
+			res, err := s.client.SMembers(opts.cacheKey).Result()
+			if err == nil {
+				return res, nil
+			}
+		}
+	}
+
 	if selector == "" {
 		selector = "*"
 	}
@@ -37,7 +50,7 @@ func (s *RedisStore) Keys(selector string) ([]string, error) {
 	var allKeys []string
 	var cursor uint64
 	for {
-		keys, next, err := s.client.Scan(cursor, selector, 0).Result()
+		keys, next, err := s.client.Scan(cursor, selector, 10000).Result()
 		if err != nil {
 			return nil, err
 		}
@@ -47,12 +60,30 @@ func (s *RedisStore) Keys(selector string) ([]string, error) {
 			break
 		}
 	}
+
+	if opts != nil && opts.cacheKey != "" {
+		pipe := s.client.Pipeline()
+		defer pipe.Close()
+		pipe.Del(opts.cacheKey)
+		if len(allKeys) > 0 {
+			var allKeysAsInterface = make([]interface{}, len(allKeys))
+			for i, key := range allKeys {
+				allKeysAsInterface[i] = key
+			}
+			pipe.SAdd(opts.cacheKey, allKeysAsInterface...)
+			if opts.cacheTTL > 0 {
+				pipe.Expire(opts.cacheKey, opts.cacheTTL)
+			}
+		}
+		pipe.Exec()
+	}
+
 	return allKeys, nil
 }
 
 // Count the results matching the selector
-func (s *RedisStore) Count(selector string) (int, error) {
-	allKeys, err := s.Keys(selector)
+func (s *RedisStore) Count(selector string, options *ListOptions) (int, error) {
+	allKeys, err := s.Keys(selector, options)
 	if err != nil {
 		return 0, err
 	}

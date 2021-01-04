@@ -43,13 +43,15 @@ func NewRedisDeviceStore(client *redis.Client, prefix string) Store {
 		store.AddMigration(v, f)
 	}
 	frameStore := storage.NewRedisQueueStore(client, prefix+":"+redisFramesPrefix)
-	return &RedisDeviceStore{
+	s := &RedisDeviceStore{
 		client:       client,
 		prefix:       prefix,
 		store:        store,
 		frameStore:   frameStore,
 		devAddrIndex: storage.NewRedisSetStore(client, prefix+":"+redisDevAddrPrefix),
 	}
+	countStore(s)
+	return s
 }
 
 // RedisDeviceStore stores Devices in Redis.
@@ -72,7 +74,7 @@ func (s *RedisDeviceStore) key(appEUI types.AppEUI, devEUI types.DevEUI) string 
 
 // Count all Devices
 func (s *RedisDeviceStore) Count() (int, error) {
-	return s.store.Count("")
+	return s.store.Count("", nil)
 }
 
 // List all Devices

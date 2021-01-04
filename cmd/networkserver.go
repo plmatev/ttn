@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -41,6 +42,7 @@ var networkserverCmd = &cobra.Command{
 			Addr:     viper.GetString("networkserver.redis-address"),
 			Password: viper.GetString("networkserver.redis-password"),
 			DB:       viper.GetInt("networkserver.redis-db"),
+			PoolSize: 10 * runtime.NumCPU(),
 		})
 
 		if err := connectRedis(client); err != nil {
@@ -84,9 +86,10 @@ var networkserverCmd = &cobra.Command{
 		grpc := grpc.NewServer(component.ServerOptions()...)
 
 		// Register and Listen
-		component.RegisterHealthServer(grpc)
 		networkserver.RegisterRPC(grpc)
 		networkserver.RegisterManager(grpc)
+		component.RegisterHealthServer(grpc) // must be last one
+
 		go grpc.Serve(lis)
 
 		sigChan := make(chan os.Signal)
@@ -114,6 +117,9 @@ func init() {
 	viper.SetDefault("networkserver.prefixes", map[string]string{
 		"26000000/20": "otaa,abp,world,local,private,testing",
 	})
+
+	networkserverCmd.Flags().Bool("force-adr-optimize", false, "Force ADR optimization")
+	viper.BindPFlag("networkserver.force-adr-optimize", networkserverCmd.Flags().Lookup("force-adr-optimize"))
 
 	networkserverCmd.Flags().String("server-address", "0.0.0.0", "The IP address to listen for communication")
 	networkserverCmd.Flags().String("server-address-announce", "localhost", "The public IP address to announce")

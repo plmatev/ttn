@@ -16,9 +16,11 @@ import (
 	"github.com/TheThingsNetwork/go-utils/grpc/rpclog"
 	"github.com/TheThingsNetwork/go-utils/roots"
 	"github.com/TheThingsNetwork/ttn/utils/errors"
-	"github.com/mwitkow/go-grpc-middleware"
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 )
 
 // RootCAs to use in API connections
@@ -64,24 +66,24 @@ func (c *conn) dial(ctx context.Context, opts ...grpc.DialOption) {
 	}()
 }
 
-// KeepAliveDialer is a dialer that adds a 10 second TCP KeepAlive
-func KeepAliveDialer(addr string, timeout time.Duration) (net.Conn, error) {
-	return (&net.Dialer{Timeout: timeout, KeepAlive: 10 * time.Second}).Dial("tcp", addr)
-}
-
 // DefaultDialOptions for connecting with servers
 var DefaultDialOptions = []grpc.DialOption{
 	grpc.WithUnaryInterceptor(grpc_middleware.ChainUnaryClient(
+		grpc_prometheus.UnaryClientInterceptor,
 		rpcerror.UnaryClientInterceptor(errors.FromGRPCError),
 		rpclog.UnaryClientInterceptor(nil),
 	)),
 	grpc.WithStreamInterceptor(grpc_middleware.ChainStreamClient(
+		grpc_prometheus.StreamClientInterceptor,
 		rpcerror.StreamClientInterceptor(errors.FromGRPCError),
 		restartstream.Interceptor(restartstream.DefaultSettings),
 		rpclog.StreamClientInterceptor(nil),
 	)),
-	grpc.WithDialer(KeepAliveDialer),
-	grpc.WithBlock(),
+	grpc.WithKeepaliveParams(keepalive.ClientParameters{
+		Time:                5 * time.Minute,
+		Timeout:             10 * time.Second,
+		PermitWithoutStream: false,
+	}),
 }
 
 // Global pool with connections
@@ -106,40 +108,40 @@ func (p *Pool) AddDialOption(opts ...grpc.DialOption) {
 	p.dialOptions = append(p.dialOptions, opts...)
 }
 
-// Close connections. If no target names supplied. just closes all.
+// Close connections. If no target names supplied, just closes all.
 func (p *Pool) Close(target ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(target) == 0 {
-		// Select all
-		for name := range p.conns {
-			target = append(target, name)
+		for target := range p.conns {
+			p.closeTarget(target)
+		}
+	} else {
+		for _, target := range target {
+			p.closeTarget(target)
 		}
 	}
-	for _, target := range target {
-		if c, ok := p.conns[target]; ok {
-			c.cancel()
-			if c.conn != nil {
-				c.conn.Close()
-			}
-			delete(p.conns, target)
+}
+
+func (p *Pool) closeTarget(target string) {
+	if c, ok := p.conns[target]; ok {
+		c.cancel()
+		if c.conn != nil {
+			c.conn.Close()
 		}
+		delete(p.conns, target)
 	}
 }
 
 // CloseConn closes a connection.
 func (p *Pool) CloseConn(conn *grpc.ClientConn) {
-	var target string
 	p.mu.Lock()
-	for t, c := range p.conns {
+	defer p.mu.Unlock()
+	for target, c := range p.conns {
 		if c.conn == conn {
-			target = t
+			p.closeTarget(target)
 			break
 		}
-	}
-	p.mu.Unlock()
-	if target != "" {
-		p.Close(target)
 	}
 	return
 }

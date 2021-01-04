@@ -35,9 +35,11 @@ func NewRedisApplicationStore(client *redis.Client, prefix string) Store {
 	for v, f := range migrate.ApplicationMigrations(prefix) {
 		store.AddMigration(v, f)
 	}
-	return &RedisApplicationStore{
+	s := &RedisApplicationStore{
 		store: store,
 	}
+	countStore(s)
+	return s
 }
 
 // RedisApplicationStore stores Applications in Redis.
@@ -48,7 +50,7 @@ type RedisApplicationStore struct {
 
 // Count all applications in the store
 func (s *RedisApplicationStore) Count() (int, error) {
-	return s.store.Count("")
+	return s.store.Count("", nil)
 }
 
 // List all Applications

@@ -16,7 +16,9 @@ import (
 	ttnlog "github.com/TheThingsNetwork/go-utils/log"
 	"github.com/TheThingsNetwork/go-utils/log/apex"
 	"github.com/TheThingsNetwork/go-utils/log/grpc"
+	promlog "github.com/TheThingsNetwork/go-utils/log/prometheus"
 	"github.com/TheThingsNetwork/ttn/api"
+	"github.com/TheThingsNetwork/ttn/core/band"
 	esHandler "github.com/TheThingsNetwork/ttn/utils/elasticsearch/handler"
 	"github.com/apex/log"
 	jsonHandler "github.com/apex/log/handlers/json"
@@ -92,9 +94,9 @@ var RootCmd = &cobra.Command{
 		}
 
 		// Set the API/gRPC logger
-		ctx = apex.Wrap(&log.Logger{
+		ctx = promlog.Wrap(apex.Wrap(&log.Logger{
 			Handler: multiHandler.New(logHandlers...),
-		})
+		}))
 		ttnlog.Set(ctx)
 		grpclog.SetLogger(grpc.Wrap(ttnlog.Get()))
 
@@ -109,6 +111,8 @@ var RootCmd = &cobra.Command{
 			"Auth Servers":             viper.GetStringMapString("auth-servers"),
 			"Monitors":                 viper.GetStringMapString("monitor-servers"),
 		}).Info("Initializing The Things Network")
+
+		band.InitializeTables()
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
 		if logFile != nil {
@@ -147,8 +151,6 @@ func init() {
 
 	RootCmd.PersistentFlags().Int("health-port", 0, "The port number where the health server should be started")
 
-	RootCmd.PersistentFlags().Duration("monitor-interval", 6*time.Second, "The interval between sending component statuses to the monitor servers")
-
 	viper.SetDefault("auth-servers", map[string]string{
 		"ttn-account-v2": "https://account.thethingsnetwork.org",
 	})
@@ -165,8 +167,13 @@ func init() {
 	}
 
 	RootCmd.PersistentFlags().Bool("tls", true, "Use TLS")
+	RootCmd.PersistentFlags().String("min-tls-version", "", "Minimum TLS version")
 	RootCmd.PersistentFlags().Bool("allow-insecure", false, "Allow insecure fallback if TLS unavailable")
 	RootCmd.PersistentFlags().String("key-dir", path.Clean(dir+"/.ttn/"), "The directory where public/private keys are stored")
+
+	RootCmd.PersistentFlags().Int("eu-rx2-dr", 3, "RX2 data rate for the EU band (SF12=0,SF9=3)")
+	RootCmd.PersistentFlags().Int("us-fsb", 1, "Frequency sub-band for the US band (0-indexed)")
+	RootCmd.PersistentFlags().Int("au-fsb", 1, "Frequency sub-band for the AU band (0-indexed)")
 
 	viper.BindPFlags(RootCmd.PersistentFlags())
 }

@@ -11,7 +11,6 @@ import (
 	"github.com/TheThingsNetwork/api/broker/brokerclient"
 	pb_discovery "github.com/TheThingsNetwork/api/discovery"
 	pb_gateway "github.com/TheThingsNetwork/api/gateway"
-	"github.com/TheThingsNetwork/api/monitor/monitorclient"
 	pb "github.com/TheThingsNetwork/api/router"
 	"github.com/TheThingsNetwork/go-utils/grpc/auth"
 	"github.com/TheThingsNetwork/go-utils/grpc/ttnctx"
@@ -60,12 +59,12 @@ func NewRouter() Router {
 
 type router struct {
 	*component.Component
-	gateways      map[string]*gateway.Gateway
-	gatewaysLock  sync.RWMutex
-	brokers       map[string]*broker
-	brokersLock   sync.RWMutex
-	status        *status
-	monitorStream monitorclient.Stream
+	gateways     map[string]*gateway.Gateway
+	gatewaysLock sync.RWMutex
+	brokers      map[string]*broker
+	brokersLock  sync.RWMutex
+	status       *status
+	// monitorStream monitorclient.Stream
 }
 
 func (r *router) tickGateways() {
@@ -95,14 +94,9 @@ func (r *router) Init(c *component.Component) error {
 		}
 	}()
 	r.Component.SetStatus(component.StatusHealthy)
-	if r.Component.Monitor != nil {
-		r.monitorStream = r.Component.Monitor.RouterClient(r.Context, grpc.PerRPCCredentials(auth.WithStaticToken(r.AccessToken)))
-		go func() {
-			for range time.Tick(r.Component.Config.StatusInterval) {
-				r.monitorStream.Send(r.GetStatus())
-			}
-		}()
-	}
+	// if r.Component.Monitor != nil {
+	// 	r.monitorStream = r.Component.Monitor.RouterClient(r.Context, grpc.PerRPCCredentials(auth.WithStaticToken(r.AccessToken)))
+	// }
 	return nil
 }
 
@@ -189,13 +183,20 @@ func (r *router) getBroker(brokerAnnouncement *pb_discovery.Announcement) (*brok
 		brk.association = cli.NewRouterStreams(r.Identity.ID, "")
 
 		go func() {
+			downlinkStream := brk.association.Downlink()
+			refreshDownlinkStream := time.NewTicker(time.Second)
 			for {
 				select {
 				case message := <-brk.uplink:
 					brk.association.Uplink(message)
-				case message, ok := <-brk.association.Downlink():
+				case <-refreshDownlinkStream.C:
+					downlinkStream = brk.association.Downlink()
+				case message, ok := <-downlinkStream:
 					if ok {
 						go r.HandleDownlink(message)
+					} else {
+						r.Ctx.WithField("broker", brokerAnnouncement.ID).Error("Downlink Stream errored")
+						downlinkStream = nil
 					}
 				}
 			}

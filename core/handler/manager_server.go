@@ -46,6 +46,10 @@ func checkAppRights(claims *claims.Claims, appID string, right types.Right) erro
 func (h *handlerManager) validateTTNAuthAppContext(ctx context.Context, appID string) (context.Context, *claims.Claims, error) {
 	md := ttnctx.MetadataFromIncomingContext(ctx)
 
+	if strings.Contains(strings.Join(md.Get("service-name"), " "), "integration-aws") {
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	// If token is empty, try to get the access key and convert it into a token
 	token, err := ttnctx.TokenFromMetadata(md)
 	if err != nil || token == "" {
@@ -64,11 +68,15 @@ func (h *handlerManager) validateTTNAuthAppContext(ctx context.Context, appID st
 	if err != nil {
 		return ctx, nil, err
 	}
-	if h.clientRate.Limit(claims.Subject) {
-		return ctx, claims, grpc.Errorf(codes.ResourceExhausted, "Rate limit for client reached")
+	if wait, ok := h.clientRate.WaitMaxDuration(claims.Subject, 500*time.Millisecond); ok {
+		time.Sleep(wait)
+	} else {
+		return ctx, claims, grpc.Errorf(codes.ResourceExhausted, "Rate limit for client %q reached", claims.Subject)
 	}
-	if h.applicationRate.Limit(appID) {
-		return ctx, claims, grpc.Errorf(codes.ResourceExhausted, "Rate limit for application reached")
+	if wait, ok := h.applicationRate.WaitMaxDuration(appID, 500*time.Millisecond); ok {
+		time.Sleep(wait)
+	} else {
+		return ctx, claims, grpc.Errorf(codes.ResourceExhausted, "Rate limit for application %q reached", appID)
 	}
 	return ctx, claims, nil
 }
@@ -100,8 +108,8 @@ func (h *handlerManager) GetDevice(ctx context.Context, in *pb_handler.DeviceIde
 	pbDev := dev.ToPb()
 
 	nsDev, err := h.handler.ttnDeviceManager.GetDevice(ttnctx.OutgoingContextWithToken(ctx, token), &pb_lorawan.DeviceIdentifier{
-		AppEUI: &dev.AppEUI,
-		DevEUI: &dev.DevEUI,
+		AppEUI: dev.AppEUI,
+		DevEUI: dev.DevEUI,
 	})
 	if errors.GetErrType(errors.FromGRPCError(err)) == errors.NotFound {
 		// Re-register the device in the Broker (NetworkServer)
@@ -125,6 +133,11 @@ func (h *handlerManager) GetDevice(ctx context.Context, in *pb_handler.DeviceIde
 	pbDev.GetLoRaWANDevice().FCntUp = nsDev.FCntUp
 	pbDev.GetLoRaWANDevice().FCntDown = nsDev.FCntDown
 	pbDev.GetLoRaWANDevice().LastSeen = nsDev.LastSeen
+
+	if dev := pbDev.GetLoRaWANDevice(); dev != nil {
+		dev.UsedAppNonces = nil
+		dev.UsedDevNonces = nil
+	}
 
 	return pbDev, nil
 }
@@ -161,16 +174,21 @@ func (h *handlerManager) SetDevice(ctx context.Context, in *pb_handler.Device) (
 	var eventType types.EventType
 	if dev != nil {
 		eventType = types.UpdateEvent
-		if dev.AppEUI != *lorawan.AppEUI || dev.DevEUI != *lorawan.DevEUI {
-			// If the AppEUI or DevEUI is changed, we should remove the device from the NetworkServer and re-add it later
+
+		// Not allowed to update join nonces after device is created
+		lorawan.UsedDevNonces, lorawan.UsedAppNonces = nil, nil
+
+		// If the AppEUI or DevEUI is changed, we should remove the device from the NetworkServer and re-add it later
+		if dev.AppEUI != lorawan.AppEUI || dev.DevEUI != lorawan.DevEUI {
 			_, err = h.handler.ttnDeviceManager.DeleteDevice(ttnctx.OutgoingContextWithToken(ctx, token), &pb_lorawan.DeviceIdentifier{
-				AppEUI: &dev.AppEUI,
-				DevEUI: &dev.DevEUI,
+				AppEUI: dev.AppEUI,
+				DevEUI: dev.DevEUI,
 			})
 			if err != nil {
 				return nil, errors.Wrap(errors.FromGRPCError(err), "Broker did not delete device")
 			}
 		}
+
 		dev.StartUpdate()
 	} else {
 		eventType = types.CreateEvent
@@ -179,19 +197,20 @@ func (h *handlerManager) SetDevice(ctx context.Context, in *pb_handler.Device) (
 			return nil, err
 		}
 		for _, existingDevice := range existingDevices {
-			if existingDevice.AppEUI == *lorawan.AppEUI && existingDevice.DevEUI == *lorawan.DevEUI {
+			if existingDevice.AppEUI == lorawan.AppEUI && existingDevice.DevEUI == lorawan.DevEUI {
 				return nil, errors.NewErrAlreadyExists("Device with AppEUI and DevEUI")
 			}
 		}
 		dev = new(device.Device)
 	}
 
-	// Reset join nonces when AppKey changes
-	if lorawan.AppKey != nil && dev.AppKey != *lorawan.AppKey { // do this BEFORE dev.FromPb(in)
-		dev.UsedAppNonces = []device.AppNonce{}
-		dev.UsedDevNonces = []device.DevNonce{}
+	if lorawan.AppKey != nil && dev.AppKey != *lorawan.AppKey {
+		// Reset join nonces when AppKey changes
+		dev.UsedDevNonces, dev.UsedAppNonces = []device.DevNonce{}, []device.AppNonce{}
 	}
+
 	dev.FromPb(in)
+
 	if dev.Options.ActivationConstraints == "" {
 		dev.Options.ActivationConstraints = "local"
 	}
@@ -200,6 +219,8 @@ func (h *handlerManager) SetDevice(ctx context.Context, in *pb_handler.Device) (
 	lorawanPb := dev.ToLoRaWANPb()
 	lorawanPb.AppKey = nil
 	lorawanPb.AppSKey = nil
+	lorawanPb.UsedDevNonces = nil
+	lorawanPb.UsedAppNonces = nil
 	lorawanPb.FCntUp = lorawan.FCntUp
 	lorawanPb.FCntDown = lorawan.FCntDown
 
@@ -217,10 +238,29 @@ func (h *handlerManager) SetDevice(ctx context.Context, in *pb_handler.Device) (
 		AppID: dev.AppID,
 		DevID: dev.DevID,
 		Event: eventType,
-		Data:  nil, // Don't send potentially sensitive details over MQTT
+		Data:  eventUpdatedFields(dev),
 	}
 
 	return &gogo.Empty{}, nil
+}
+
+// eventUpdatedFields create DeviceEvent based of on the changelist of a device
+func eventUpdatedFields(dev *device.Device) types.DeviceEventData {
+	changeList := dev.ChangedFields()
+	e := types.DeviceEventData{}
+	for _, key := range changeList {
+		switch key {
+		case "Latitude":
+			e.Latitude = dev.Latitude
+		case "Longitude":
+			e.Longitude = dev.Longitude
+		case "Altitude":
+			e.Altitude = dev.Altitude
+		case "UpdatedAt":
+			e.UpdatedAt = dev.UpdatedAt
+		}
+	}
+	return e
 }
 
 func (h *handlerManager) DeleteDevice(ctx context.Context, in *pb_handler.DeviceIdentifier) (*gogo.Empty, error) {
@@ -245,7 +285,7 @@ func (h *handlerManager) DeleteDevice(ctx context.Context, in *pb_handler.Device
 	if err != nil {
 		return nil, err
 	}
-	_, err = h.handler.ttnDeviceManager.DeleteDevice(ttnctx.OutgoingContextWithToken(ctx, token), &pb_lorawan.DeviceIdentifier{AppEUI: &dev.AppEUI, DevEUI: &dev.DevEUI})
+	_, err = h.handler.ttnDeviceManager.DeleteDevice(ttnctx.OutgoingContextWithToken(ctx, token), &pb_lorawan.DeviceIdentifier{AppEUI: dev.AppEUI, DevEUI: dev.DevEUI})
 	if err != nil && errors.GetErrType(errors.FromGRPCError(err)) != errors.NotFound {
 		return nil, errors.Wrap(errors.FromGRPCError(err), "Broker did not delete device")
 	}
@@ -294,6 +334,13 @@ func (h *handlerManager) GetDevicesForApplication(ctx context.Context, in *pb_ha
 			continue
 		}
 		res.Devices = append(res.Devices, dev.ToPb())
+	}
+
+	for _, dev := range res.Devices {
+		if dev := dev.GetLoRaWANDevice(); dev != nil {
+			dev.UsedAppNonces = nil
+			dev.UsedDevNonces = nil
+		}
 	}
 
 	total, selected := opts.GetTotalAndSelected()
@@ -455,7 +502,7 @@ func (h *handlerManager) DeleteApplication(ctx context.Context, in *pb_handler.A
 		return nil, err
 	}
 	for _, dev := range devices {
-		_, err = h.handler.ttnDeviceManager.DeleteDevice(ttnctx.OutgoingContextWithToken(ctx, token), &pb_lorawan.DeviceIdentifier{AppEUI: &dev.AppEUI, DevEUI: &dev.DevEUI})
+		_, err = h.handler.ttnDeviceManager.DeleteDevice(ttnctx.OutgoingContextWithToken(ctx, token), &pb_lorawan.DeviceIdentifier{AppEUI: dev.AppEUI, DevEUI: dev.DevEUI})
 		if err != nil {
 			return nil, errors.Wrap(errors.FromGRPCError(err), "Broker did not delete device")
 		}
@@ -518,8 +565,8 @@ func (h *handler) RegisterManager(s *grpc.Server) {
 		devAddrManager: pb_lorawan.NewDevAddrManagerClient(h.ttnBrokerConn),
 	}
 
-	server.applicationRate = ratelimit.NewRegistry(5000, time.Hour)
-	server.clientRate = ratelimit.NewRegistry(5000, time.Hour)
+	server.applicationRate = ratelimit.NewRegistry(5, time.Second)
+	server.clientRate = ratelimit.NewRegistry(5, time.Second)
 
 	pb_handler.RegisterHandlerManagerServer(s, server)
 	pb_handler.RegisterApplicationManagerServer(s, server)

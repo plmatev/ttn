@@ -34,6 +34,7 @@ func (b *broker) HandleActivation(activation *pb.DeviceActivationRequest) (res *
 	deduplicatedActivationRequest := new(pb.DeduplicatedDeviceActivationRequest)
 	deduplicatedActivationRequest.ServerTime = start.UnixNano()
 
+	b.RegisterReceived(activation)
 	defer func() {
 		if err != nil {
 			if deduplicatedActivationRequest != nil {
@@ -41,11 +42,12 @@ func (b *broker) HandleActivation(activation *pb.DeviceActivationRequest) (res *
 			}
 			ctx.WithError(err).Warn("Could not handle activation")
 		} else {
+			b.RegisterHandled(activation)
 			ctx.WithField("Duration", time.Now().Sub(start)).Info("Handled activation")
 		}
-		if deduplicatedActivationRequest != nil && b.monitorStream != nil {
-			b.monitorStream.Send(deduplicatedActivationRequest)
-		}
+		// if deduplicatedActivationRequest != nil && b.monitorStream != nil {
+		// 	b.monitorStream.Send(deduplicatedActivationRequest)
+		// }
 	}()
 
 	b.status.activations.Mark(1)
@@ -78,7 +80,7 @@ func (b *broker) HandleActivation(activation *pb.DeviceActivationRequest) (res *
 	// Collect GatewayMetadata and DownlinkOptions
 	var downlinkOptions []*pb.DownlinkOption
 	for _, duplicate := range duplicates {
-		deduplicatedActivationRequest.GatewayMetadata = append(deduplicatedActivationRequest.GatewayMetadata, duplicate.GatewayMetadata)
+		deduplicatedActivationRequest.GatewayMetadata = append(deduplicatedActivationRequest.GatewayMetadata, &duplicate.GatewayMetadata)
 		downlinkOptions = append(downlinkOptions, duplicate.DownlinkOptions...)
 	}
 
@@ -216,7 +218,7 @@ func (b *broker) HandleActivation(activation *pb.DeviceActivationRequest) (res *
 	res = &pb.DeviceActivationResponse{
 		Payload:        handlerResponse.Payload,
 		Message:        handlerResponse.Message,
-		DownlinkOption: handlerResponse.DownlinkOption,
+		DownlinkOption: &handlerResponse.DownlinkOption,
 		Trace:          handlerResponse.Trace,
 	}
 

@@ -10,10 +10,8 @@ import (
 	"time"
 
 	pb "github.com/TheThingsNetwork/api/broker"
-	"github.com/TheThingsNetwork/api/monitor/monitorclient"
 	"github.com/TheThingsNetwork/api/networkserver"
 	pb_lorawan "github.com/TheThingsNetwork/api/protocol/lorawan"
-	"github.com/TheThingsNetwork/go-utils/grpc/auth"
 	"github.com/TheThingsNetwork/ttn/api"
 	"github.com/TheThingsNetwork/ttn/core/component"
 	"github.com/TheThingsNetwork/ttn/core/types"
@@ -31,15 +29,15 @@ type Broker interface {
 	HandleDownlink(downlink *pb.DownlinkMessage) error
 	HandleActivation(activation *pb.DeviceActivationRequest) (*pb.DeviceActivationResponse, error)
 
-	ActivateRouter(id string) (<-chan *pb.DownlinkMessage, error)
-	DeactivateRouter(id string) error
+	ActivateRouterDownlink(id string) (<-chan *pb.DownlinkMessage, error)
+	DeactivateRouterDownlink(id string) error
 	ActivateHandlerUplink(id string) (<-chan *pb.DeduplicatedUplinkMessage, error)
 	DeactivateHandlerUplink(id string) error
 }
 
 func NewBroker(timeout time.Duration) Broker {
 	return &broker{
-		routers:                make(map[string]chan *pb.DownlinkMessage),
+		routers:                make(map[string]*router),
 		handlers:               make(map[string]*handler),
 		uplinkDeduplicator:     NewDeduplicator(timeout),
 		activationDeduplicator: NewDeduplicator(timeout),
@@ -54,7 +52,7 @@ func (b *broker) SetNetworkServer(addr, cert, token string) {
 
 type broker struct {
 	*component.Component
-	routers                map[string]chan *pb.DownlinkMessage
+	routers                map[string]*router
 	routersLock            sync.RWMutex
 	handlers               map[string]*handler
 	handlersLock           sync.RWMutex
@@ -66,7 +64,7 @@ type broker struct {
 	uplinkDeduplicator     Deduplicator
 	activationDeduplicator Deduplicator
 	status                 *status
-	monitorStream          monitorclient.Stream
+	// monitorStream          monitorclient.Stream
 }
 
 func (b *broker) checkPrefixAnnouncements() error {
@@ -111,6 +109,7 @@ nextPrefix:
 
 func (b *broker) Init(c *component.Component) error {
 	b.Component = c
+	initMetrics()
 	b.InitStatus()
 	err := b.Component.UpdateTokenKey()
 	if err != nil {
@@ -134,52 +133,72 @@ func (b *broker) Init(c *component.Component) error {
 	b.ns = networkserver.NewNetworkServerClient(conn)
 	b.checkPrefixAnnouncements()
 	b.Component.SetStatus(component.StatusHealthy)
-	if b.Component.Monitor != nil {
-		b.monitorStream = b.Component.Monitor.BrokerClient(b.Context, grpc.PerRPCCredentials(auth.WithStaticToken(b.AccessToken)))
-		go func() {
-			for range time.Tick(b.Component.Config.StatusInterval) {
-				b.monitorStream.Send(b.GetStatus())
-			}
-		}()
-	}
+	// if b.Component.Monitor != nil {
+	// 	b.monitorStream = b.Component.Monitor.BrokerClient(b.Context, grpc.PerRPCCredentials(auth.WithStaticToken(b.AccessToken)))
+	// }
 	return nil
 }
 
 func (b *broker) Shutdown() {}
 
-func (b *broker) ActivateRouter(id string) (<-chan *pb.DownlinkMessage, error) {
+type router struct {
+	downlinkConns int
+	downlink      chan *pb.DownlinkMessage
+	sync.Mutex
+}
+
+func (b *broker) getRouter(id string) *router {
 	b.routersLock.Lock()
 	defer b.routersLock.Unlock()
 	if existing, ok := b.routers[id]; ok {
-		return existing, errors.NewErrInternal(fmt.Sprintf("Router %s already active", id))
+		return existing
 	}
-	b.routers[id] = make(chan *pb.DownlinkMessage)
-	return b.routers[id], nil
+	b.routers[id] = new(router)
+	return b.routers[id]
 }
 
-func (b *broker) DeactivateRouter(id string) error {
-	b.routersLock.Lock()
-	defer b.routersLock.Unlock()
-	if channel, ok := b.routers[id]; ok {
-		close(channel)
-		delete(b.routers, id)
-		return nil
+func (b *broker) ActivateRouterDownlink(id string) (<-chan *pb.DownlinkMessage, error) {
+	rtr := b.getRouter(id)
+	rtr.Lock()
+	defer rtr.Unlock()
+	if rtr.downlink == nil {
+		rtr.downlink = make(chan *pb.DownlinkMessage)
 	}
-	return errors.NewErrInternal(fmt.Sprintf("Router %s not active", id))
+	rtr.downlinkConns++
+	connectedRouters.Inc()
+	return rtr.downlink, nil
 }
 
-func (b *broker) getRouter(id string) (chan<- *pb.DownlinkMessage, error) {
-	b.routersLock.RLock()
-	defer b.routersLock.RUnlock()
-	if router, ok := b.routers[id]; ok {
-		return router, nil
+func (b *broker) DeactivateRouterDownlink(id string) error {
+	rtr := b.getRouter(id)
+	rtr.Lock()
+	defer rtr.Unlock()
+	if rtr.downlinkConns == 0 {
+		return errors.NewErrInternal(fmt.Sprintf("Router %s not active", id))
 	}
-	return nil, errors.NewErrInternal(fmt.Sprintf("Router %s not active", id))
+	connectedRouters.Dec()
+	rtr.downlinkConns--
+	if rtr.downlinkConns == 0 {
+		close(rtr.downlink)
+		rtr.downlink = nil
+	}
+	return nil
+}
+
+func (b *broker) getRouterDownlink(id string) (chan<- *pb.DownlinkMessage, error) {
+	rtr := b.getRouter(id)
+	rtr.Lock()
+	defer rtr.Unlock()
+	if rtr.downlink == nil {
+		return nil, errors.NewErrInternal(fmt.Sprintf("Router %s not active", id))
+	}
+	return rtr.downlink, nil
 }
 
 type handler struct {
-	conn   *grpc.ClientConn
-	uplink chan *pb.DeduplicatedUplinkMessage
+	conn        *grpc.ClientConn
+	uplinkConns int
+	uplink      chan *pb.DeduplicatedUplinkMessage
 	sync.Mutex
 }
 
@@ -197,10 +216,11 @@ func (b *broker) ActivateHandlerUplink(id string) (<-chan *pb.DeduplicatedUplink
 	hdl := b.getHandler(id)
 	hdl.Lock()
 	defer hdl.Unlock()
-	if hdl.uplink != nil {
-		return hdl.uplink, errors.NewErrInternal(fmt.Sprintf("Handler %s already active", id))
+	if hdl.uplink == nil {
+		hdl.uplink = make(chan *pb.DeduplicatedUplinkMessage)
 	}
-	hdl.uplink = make(chan *pb.DeduplicatedUplinkMessage)
+	hdl.uplinkConns++
+	connectedHandlers.Inc()
 	return hdl.uplink, nil
 }
 
@@ -208,11 +228,15 @@ func (b *broker) DeactivateHandlerUplink(id string) error {
 	hdl := b.getHandler(id)
 	hdl.Lock()
 	defer hdl.Unlock()
-	if hdl.uplink == nil {
+	if hdl.uplinkConns == 0 {
 		return errors.NewErrInternal(fmt.Sprintf("Handler %s not active", id))
 	}
-	close(hdl.uplink)
-	hdl.uplink = nil
+	connectedHandlers.Dec()
+	hdl.uplinkConns--
+	if hdl.uplinkConns == 0 {
+		close(hdl.uplink)
+		hdl.uplink = nil
+	}
 	return nil
 }
 

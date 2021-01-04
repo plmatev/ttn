@@ -7,10 +7,12 @@ import (
 	"time"
 
 	pb_broker "github.com/TheThingsNetwork/api/broker"
+	pb_lorawan "github.com/TheThingsNetwork/api/protocol/lorawan"
 	"github.com/TheThingsNetwork/api/trace"
 	ttnlog "github.com/TheThingsNetwork/go-utils/log"
 	"github.com/TheThingsNetwork/ttn/core/types"
 	"github.com/TheThingsNetwork/ttn/utils/errors"
+	"github.com/TheThingsNetwork/ttn/utils/toa"
 )
 
 func (h *handler) EnqueueDownlink(appDownlink *types.DownlinkMessage) (err error) {
@@ -38,7 +40,8 @@ func (h *handler) EnqueueDownlink(appDownlink *types.DownlinkMessage) (err error
 
 	defer func() {
 		if err != nil {
-			h.qEvent <- &types.DeviceEvent{
+			select {
+			case h.qEvent <- &types.DeviceEvent{
 				AppID: appID,
 				DevID: devID,
 				Event: types.DownlinkErrorEvent,
@@ -46,6 +49,9 @@ func (h *handler) EnqueueDownlink(appDownlink *types.DownlinkMessage) (err error
 					ErrorEventData: types.ErrorEventData{Error: err.Error()},
 					Message:        appDownlink,
 				},
+			}:
+			case <-time.After(eventPublishTimeout):
+				ctx.Warnf("Could not emit %q event", types.DownlinkErrorEvent)
 			}
 		}
 	}()
@@ -86,13 +92,17 @@ func (h *handler) EnqueueDownlink(appDownlink *types.DownlinkMessage) (err error
 		return err
 	}
 
-	h.qEvent <- &types.DeviceEvent{
+	select {
+	case h.qEvent <- &types.DeviceEvent{
 		AppID: appID,
 		DevID: devID,
 		Event: types.DownlinkScheduledEvent,
 		Data: types.DownlinkEventData{
 			Message: appDownlink,
 		},
+	}:
+	case <-time.After(eventPublishTimeout):
+		ctx.Warnf("Could not emit %q event", types.DownlinkScheduledEvent)
 	}
 	return nil
 }
@@ -109,7 +119,8 @@ func (h *handler) HandleDownlink(appDownlink *types.DownlinkMessage, downlink *p
 
 	defer func() {
 		if err != nil {
-			h.qEvent <- &types.DeviceEvent{
+			select {
+			case h.qEvent <- &types.DeviceEvent{
 				AppID: appID,
 				DevID: devID,
 				Event: types.DownlinkErrorEvent,
@@ -117,13 +128,16 @@ func (h *handler) HandleDownlink(appDownlink *types.DownlinkMessage, downlink *p
 					ErrorEventData: types.ErrorEventData{Error: err.Error()},
 					Message:        appDownlink,
 				},
+			}:
+			case <-time.After(eventPublishTimeout):
+				ctx.Warnf("Could not emit %q event", types.DownlinkErrorEvent)
 			}
 			ctx.WithError(err).Warn("Could not handle downlink")
 			downlink.Trace = downlink.Trace.WithEvent(trace.DropEvent, "reason", err)
 		}
-		if downlink != nil && h.monitorStream != nil {
-			h.monitorStream.Send(downlink)
-		}
+		// if downlink != nil && h.monitorStream != nil {
+		// 	h.monitorStream.Send(downlink)
+		// }
 	}()
 
 	dev, err := h.devices.Get(appID, devID)
@@ -161,6 +175,7 @@ func (h *handler) HandleDownlink(appDownlink *types.DownlinkMessage, downlink *p
 	downlink.Message = nil
 	downlink.UnmarshalPayload()
 
+	h.RegisterHandled(downlink)
 	h.status.downlink.Mark(1)
 
 	ctx.Debug("Send Downlink")
@@ -171,20 +186,23 @@ func (h *handler) HandleDownlink(appDownlink *types.DownlinkMessage, downlink *p
 
 	downlinkConfig := types.DownlinkEventConfigInfo{}
 
-	if downlink.DownlinkOption.ProtocolConfiguration != nil {
-		if lorawan := downlink.DownlinkOption.ProtocolConfiguration.GetLoRaWAN(); lorawan != nil {
-			downlinkConfig.Modulation = lorawan.Modulation.String()
-			downlinkConfig.DataRate = lorawan.DataRate
-			downlinkConfig.BitRate = uint(lorawan.BitRate)
-			downlinkConfig.FCnt = uint(lorawan.FCnt)
+	if lorawan := downlink.DownlinkOption.ProtocolConfiguration.GetLoRaWAN(); lorawan != nil {
+		downlinkConfig.Modulation = lorawan.Modulation.String()
+		downlinkConfig.DataRate = lorawan.DataRate
+		downlinkConfig.BitRate = uint(lorawan.BitRate)
+		downlinkConfig.FCnt = uint(lorawan.FCnt)
+		switch lorawan.Modulation {
+		case pb_lorawan.Modulation_LORA:
+			downlinkConfig.Airtime, _ = toa.ComputeLoRa(uint(len(downlink.Payload)), lorawan.DataRate, lorawan.CodingRate)
+		case pb_lorawan.Modulation_FSK:
+			downlinkConfig.Airtime, _ = toa.ComputeFSK(uint(len(downlink.Payload)), int(lorawan.BitRate))
 		}
 	}
-	if gateway := downlink.DownlinkOption.GatewayConfiguration; gateway != nil {
-		downlinkConfig.Frequency = uint(downlink.DownlinkOption.GatewayConfiguration.Frequency)
-		downlinkConfig.Power = int(downlink.DownlinkOption.GatewayConfiguration.Power)
-	}
+	downlinkConfig.Frequency = uint(downlink.DownlinkOption.GatewayConfiguration.Frequency)
+	downlinkConfig.Power = int(downlink.DownlinkOption.GatewayConfiguration.Power)
 
-	h.qEvent <- &types.DeviceEvent{
+	select {
+	case h.qEvent <- &types.DeviceEvent{
 		AppID: appDownlink.AppID,
 		DevID: appDownlink.DevID,
 		Event: types.DownlinkSentEvent,
@@ -192,8 +210,11 @@ func (h *handler) HandleDownlink(appDownlink *types.DownlinkMessage, downlink *p
 			Payload:   downlink.Payload,
 			Message:   appDownlink,
 			GatewayID: downlink.DownlinkOption.GatewayID,
-			Config:    downlinkConfig,
+			Config:    &downlinkConfig,
 		},
+	}:
+	case <-time.After(eventPublishTimeout):
+		ctx.Warnf("Could not emit %q event", types.DownlinkSentEvent)
 	}
 	return nil
 }

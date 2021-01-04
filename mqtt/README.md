@@ -1,9 +1,8 @@
 # API Reference
 
 * Host: `<Region>.thethings.network`, where `<Region>` is last part of the handler you registered your application to, e.g. `eu`.
-* Port: `1883` or `8883` for TLS
-* PEM encoded CA certificate for TLS: [mqtt-ca.pem](https://console.thethingsnetwork.org/mqtt-ca.pem)
-  - Note: When this certificate expires, we will migrate to Let's Encrypt certificates. Therefore you might want to include the [Let's Encrypt Roots](https://letsencrypt.org/certificates/) in your certificate chain.
+* Port: `1883`, or `8883` for TLS
+* For TLS, the server uses a Let's Encrypt certificate. If your server does not trust that yet, you might want to include the [Let's Encrypt Roots](https://letsencrypt.org/certificates/) in your certificate chain. Alternatively you can use our PEM-encoded CA certificate, which includes those roots as well: [mqtt-ca.pem](https://console.thethingsnetwork.org/mqtt-ca.pem)
 * Username: Application ID
 * Password: Application Access Key
 
@@ -25,6 +24,7 @@
   "payload_raw": "AQIDBA==",          // Base64 encoded payload: [0x01, 0x02, 0x03, 0x04]
   "payload_fields": {},               // Object containing the results from the payload functions - left out when empty
   "metadata": {
+    "airtime": 46336000,              // Airtime in nanoseconds
     "time": "1970-01-01T00:00:00Z",   // Time when the server received the message
     "frequency": 868.1,               // Frequency at which the message was sent
     "modulation": "LORA",             // Modulation that was used - LORA or FSK
@@ -55,7 +55,7 @@
 
 Note: Some values may be omitted if they are `null`, `false`, `""` or `0`.
 
-**Usage (Mosquitto):** `mosquitto_sub -h <Region>.thethings.network:1883 -d -t 'my-app-id/devices/my-dev-id/up'`
+**Usage (Mosquitto):** `mosquitto_sub -h <Region>.thethings.network -d -t 'my-app-id/devices/my-dev-id/up'`
 
 **Usage (Go client):**
 
@@ -126,7 +126,7 @@ you will see this on MQTT:
 }
 ```
 
-**Usage (Mosquitto):** `mosquitto_pub -h <Region>.thethings.network:1883 -d -t 'my-app-id/devices/my-dev-id/down' -m '{"port":1,"payload_raw":"AQIDBA=="}'`
+**Usage (Mosquitto):** `mosquitto_pub -h <Region>.thethings.network -d -t 'my-app-id/devices/my-dev-id/down' -m '{"port":1,"payload_raw":"AQIDBA=="}'`
 
 **Usage (Go client):**
 
@@ -161,7 +161,7 @@ Instead of `payload_raw` you can also use `payload_fields` with an object of fie
 }
 ```
 
-**Usage (Mosquitto):** `mosquitto_pub -h <Region>.thethings.network:1883 -d -t 'my-app-id/devices/my-dev-id/down' -m '{"port":1,"payload_fields":{"led":true}}'`
+**Usage (Mosquitto):** `mosquitto_pub -h <Region>.thethings.network -d -t 'my-app-id/devices/my-dev-id/down' -m '{"port":1,"payload_fields":{"led":true}}'`
 
 **Usage (Go client):**
 
@@ -213,7 +213,7 @@ downlink as the _first_ or _last_ item in a the downlink queue.
 }
 ```
 
-**Usage (Mosquitto):** `mosquitto_sub -h <Region>.thethings.network:1883 -d -t 'my-app-id/devices/my-dev-id/events/activations'`
+**Usage (Mosquitto):** `mosquitto_sub -h <Region>.thethings.network -d -t 'my-app-id/devices/my-dev-id/events/activations'`
 
 **Usage (Go client):**
 
@@ -251,6 +251,7 @@ payload: _null_
   "config": {
     "modulation": "LORA",
     "data_rate": "SF7BW125",
+    "airtime": 46336000,
     "counter": 123,
     "frequency": 868300000,
     "power": 14

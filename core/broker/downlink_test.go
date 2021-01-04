@@ -28,15 +28,15 @@ func TestDownlink(t *testing.T) {
 			Monitor: monitorclient.NewMonitorClient(),
 		},
 		ns: &mockNetworkServer{},
-		routers: map[string]chan *pb.DownlinkMessage{
-			"routerID": dlch,
+		routers: map[string]*router{
+			"routerID": &router{downlinkConns: 1, downlink: dlch},
 		},
 	}
 	b.InitStatus()
 
 	err := b.HandleDownlink(&pb.DownlinkMessage{
-		DevEUI: &devEUI,
-		AppEUI: &appEUI,
+		DevEUI: devEUI,
+		AppEUI: appEUI,
 		DownlinkOption: &pb.DownlinkOption{
 			Identifier: "fakeID",
 		},
@@ -44,8 +44,8 @@ func TestDownlink(t *testing.T) {
 	a.So(err, ShouldNotBeNil)
 
 	err = b.HandleDownlink(&pb.DownlinkMessage{
-		DevEUI: &devEUI,
-		AppEUI: &appEUI,
+		DevEUI: devEUI,
+		AppEUI: appEUI,
 		DownlinkOption: &pb.DownlinkOption{
 			Identifier: "nonExistentRouterID:scheduleID",
 		},
@@ -53,8 +53,8 @@ func TestDownlink(t *testing.T) {
 	a.So(err, ShouldNotBeNil)
 
 	err = b.HandleDownlink(&pb.DownlinkMessage{
-		DevEUI: &devEUI,
-		AppEUI: &appEUI,
+		DevEUI: devEUI,
+		AppEUI: appEUI,
 		DownlinkOption: &pb.DownlinkOption{
 			Identifier: "routerID:scheduleID",
 		},

@@ -24,15 +24,18 @@ func (b *broker) HandleDownlink(downlink *pb.DownlinkMessage) error {
 	ctx := b.Ctx.WithFields(logfields.ForMessage(downlink))
 	var err error
 	start := time.Now()
+
+	b.RegisterReceived(downlink)
 	defer func() {
 		if err != nil {
 			ctx.WithError(err).Warn("Could not handle downlink")
 		} else {
+			b.RegisterHandled(downlink)
 			ctx.WithField("Duration", time.Now().Sub(start)).Info("Handled downlink")
 		}
-		if downlink != nil && b.monitorStream != nil {
-			b.monitorStream.Send(downlink)
-		}
+		// if downlink != nil && b.monitorStream != nil {
+		// 	b.monitorStream.Send(downlink)
+		// }
 	}()
 
 	b.status.downlink.Mark(1)
@@ -52,7 +55,7 @@ func (b *broker) HandleDownlink(downlink *pb.DownlinkMessage) error {
 	}
 	ctx = ctx.WithField("RouterID", routerID)
 
-	router, err := b.getRouter(routerID)
+	router, err := b.getRouterDownlink(routerID)
 	if err != nil {
 		return err
 	}

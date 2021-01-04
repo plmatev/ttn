@@ -14,7 +14,6 @@ When you get started with The Things Network, you'll probably have some question
 - Read the [official documentation](https://www.thethingsnetwork.org/docs/)
 - Register on the [forum](https://www.thethingsnetwork.org/forum/) and search around
 - Join [Slack](https://slack.thethingsnetwork.org) and ask us what you want to know
-- Read background information on the [wiki](https://www.thethingsnetwork.org/wiki/)
 
 ## Installing and Running The Things Network Stack
 
@@ -24,7 +23,7 @@ Although we're all about building an open, public network, we understand that so
 
 First, you'll have to prepare your development environment. Follow the steps below to set up your development machine.
 
-1. Make sure you have [Go](https://golang.org) installed (version 1.8 or later).
+1. Make sure you have [Go](https://golang.org) installed (version 1.11 or later).
 2. Set up your [Go environment](https://golang.org/doc/code.html#GOPATH)
 3. Install the [protobuf compiler (`protoc`)](https://github.com/google/protobuf/releases)
 4. Install `make`. On Linux install `build-essential`. On macOS, `make` comes with XCode or the developer tools. On Windows you can get `make` from [https://gnuarmeclipse.github.io/windows-build-tools/](https://gnuarmeclipse.github.io/windows-build-tools/)

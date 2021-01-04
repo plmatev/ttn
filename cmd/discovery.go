@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	goruntime "runtime"
 	"syscall"
 
 	pb "github.com/TheThingsNetwork/api/discovery"
@@ -47,6 +48,7 @@ var discoveryCmd = &cobra.Command{
 			Addr:     viper.GetString("discovery.redis-address"),
 			Password: viper.GetString("discovery.redis-password"),
 			DB:       viper.GetInt("discovery.redis-db"),
+			PoolSize: 10 * goruntime.NumCPU(),
 		})
 
 		if err := connectRedis(client); err != nil {
@@ -64,6 +66,7 @@ var discoveryCmd = &cobra.Command{
 		if viper.GetBool("discovery.cache") {
 			discovery.WithCache(announcement.DefaultCacheOptions)
 		}
+		discovery.MonitorServiceConnectivity()
 		discovery.WithMasterAuthServers(viper.GetStringSlice("discovery.master-auth-servers")...)
 		err = discovery.Init(component)
 		if err != nil {
@@ -78,8 +81,9 @@ var discoveryCmd = &cobra.Command{
 		grpc := grpc.NewServer(component.ServerOptions()...)
 
 		// Register and Listen
-		component.RegisterHealthServer(grpc)
 		discovery.RegisterRPC(grpc)
+		component.RegisterHealthServer(grpc) // must be last one
+
 		go grpc.Serve(lis)
 
 		if viper.GetString("discovery.http-address") != "" && viper.GetInt("discovery.http-port") != 0 {

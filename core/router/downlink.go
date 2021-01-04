@@ -22,6 +22,7 @@ import (
 	"github.com/TheThingsNetwork/ttn/core/types"
 	"github.com/TheThingsNetwork/ttn/utils/errors"
 	"github.com/TheThingsNetwork/ttn/utils/toa"
+	"github.com/spf13/viper"
 )
 
 func (r *router) SubscribeDownlink(gatewayID string, subscriptionID string) (<-chan *pb.DownlinkMessage, error) {
@@ -31,7 +32,9 @@ func (r *router) SubscribeDownlink(gatewayID string, subscriptionID string) (<-c
 
 	gateway := r.getGateway(gatewayID)
 	if fromSchedule := gateway.Schedule.Subscribe(subscriptionID); fromSchedule != nil {
-		r.Discovery.AddGatewayID(gatewayID, gateway.Token())
+		if token := gateway.Token(); gatewayID != "" && token != "" {
+			r.Discovery.AddGatewayID(gatewayID, token)
+		}
 		toGateway := make(chan *pb.DownlinkMessage)
 		go func() {
 			ctx.Debug("Activate downlink")
@@ -54,19 +57,25 @@ func (r *router) SubscribeDownlink(gatewayID string, subscriptionID string) (<-c
 
 func (r *router) UnsubscribeDownlink(gatewayID string, subscriptionID string) error {
 	gateway := r.getGateway(gatewayID)
-	r.Discovery.RemoveGatewayID(gatewayID, gateway.Token())
+	if token := gateway.Token(); gatewayID != "" && token != "" {
+		r.Discovery.RemoveGatewayID(gatewayID, token)
+	}
 	gateway.Schedule.Stop(subscriptionID)
 	return nil
 }
 
 func (r *router) HandleDownlink(downlink *pb_broker.DownlinkMessage) (err error) {
 	var gateway *gateway.Gateway
+
+	r.RegisterReceived(downlink)
 	defer func() {
 		if err != nil {
 			downlink.Trace = downlink.Trace.WithEvent(trace.DropEvent, "reason", err)
 			if gateway != nil && gateway.MonitorStream != nil {
 				gateway.MonitorStream.Send(downlink)
 			}
+		} else {
+			r.RegisterHandled(downlink)
 		}
 	}()
 	r.status.downlink.Mark(1)
@@ -74,6 +83,12 @@ func (r *router) HandleDownlink(downlink *pb_broker.DownlinkMessage) (err error)
 	downlink.Trace = downlink.Trace.WithEvent(trace.ReceiveEvent)
 
 	option := downlink.DownlinkOption
+
+	// NOTE: This option is intentionally undocumented.
+	if maxTxPower := int32(viper.GetInt("lorawan.max-tx-power")); maxTxPower != 0 &&
+		option.GatewayConfiguration.Power > maxTxPower {
+		option.GatewayConfiguration.Power = maxTxPower
+	}
 
 	downlinkMessage := &pb.DownlinkMessage{
 		Payload:               downlink.Payload,
@@ -96,12 +111,12 @@ func (r *router) buildDownlinkOption(gatewayID string, band band.FrequencyPlan) 
 	dataRate, _ := types.ConvertDataRate(band.DataRates[band.RX2DataRate])
 	return &pb_broker.DownlinkOption{
 		GatewayID: gatewayID,
-		ProtocolConfiguration: &pb_protocol.TxConfiguration{Protocol: &pb_protocol.TxConfiguration_LoRaWAN{LoRaWAN: &pb_lorawan.TxConfiguration{
+		ProtocolConfiguration: pb_protocol.TxConfiguration{Protocol: &pb_protocol.TxConfiguration_LoRaWAN{LoRaWAN: &pb_lorawan.TxConfiguration{
 			Modulation: pb_lorawan.Modulation_LORA,
 			DataRate:   dataRate.String(),
 			CodingRate: "4/5",
 		}}},
-		GatewayConfiguration: &pb_gateway.TxConfiguration{
+		GatewayConfiguration: pb_gateway.TxConfiguration{
 			RfChain:               0,
 			PolarizationInversion: true,
 			Frequency:             uint64(band.RX2Frequency),
@@ -226,7 +241,8 @@ func computeDownlinkScores(gateway *gateway.Gateway, uplink *pb.UplinkMessage, o
 	for _, option := range options {
 
 		// Invalid if no LoRaWAN
-		lorawan := option.GetProtocolConfiguration().GetLoRaWAN()
+		conf := option.GetProtocolConfiguration()
+		lorawan := conf.GetLoRaWAN()
 		if lorawan == nil {
 			option.Score = 1000
 			continue

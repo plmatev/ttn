@@ -30,6 +30,8 @@ func (b *broker) HandleUplink(uplink *pb.UplinkMessage) (err error) {
 	start := time.Now()
 	deduplicatedUplink := new(pb.DeduplicatedUplinkMessage)
 	deduplicatedUplink.ServerTime = start.UnixNano()
+
+	b.RegisterReceived(uplink)
 	defer func() {
 		if err != nil {
 			if deduplicatedUplink != nil {
@@ -37,11 +39,12 @@ func (b *broker) HandleUplink(uplink *pb.UplinkMessage) (err error) {
 			}
 			ctx.WithError(err).Warn("Could not handle uplink")
 		} else {
+			b.RegisterHandled(uplink)
 			ctx.WithField("Duration", time.Now().Sub(start)).Info("Handled uplink")
 		}
-		if deduplicatedUplink != nil && b.monitorStream != nil {
-			b.monitorStream.Send(deduplicatedUplink)
-		}
+		// if deduplicatedUplink != nil && b.monitorStream != nil {
+		// 	b.monitorStream.Send(deduplicatedUplink)
+		// }
 	}()
 
 	b.status.uplink.Mark(1)
@@ -91,13 +94,14 @@ func (b *broker) HandleUplink(uplink *pb.UplinkMessage) (err error) {
 	})
 	var getDevicesResp *networkserver.DevicesResponse
 	getDevicesResp, err = b.ns.GetDevices(b.Component.GetContext(b.nsToken), &networkserver.DevicesRequest{
-		DevAddr: &devAddr,
+		DevAddr: devAddr,
 		FCnt:    macPayload.FHDR.FCnt,
 	})
 	if err != nil {
 		return errors.Wrap(errors.FromGRPCError(err), "NetworkServer did not return devices")
 	}
 	b.status.deduplication.Update(int64(len(getDevicesResp.Results)))
+	duplicatesHistogram.Observe(float64(len(getDevicesResp.Results)))
 	if len(getDevicesResp.Results) == 0 {
 		return errors.NewErrNotFound(fmt.Sprintf("Device with DevAddr %s and FCnt <= %d", devAddr, macPayload.FHDR.FCnt))
 	}
@@ -150,6 +154,8 @@ func (b *broker) HandleUplink(uplink *pb.UplinkMessage) (err error) {
 		return errors.NewErrNotFound("device that validates MIC")
 	}
 
+	micChecksHistogram.Observe(float64(micChecks))
+
 	ctx = ctx.WithFields(ttnlog.Fields{
 		"MICChecks": micChecks,
 		"DevEUI":    device.DevEUI,
@@ -158,8 +164,8 @@ func (b *broker) HandleUplink(uplink *pb.UplinkMessage) (err error) {
 		"DevID":     device.DevID,
 		"FCnt":      originalFCnt,
 	})
-	deduplicatedUplink.DevEUI = device.DevEUI
-	deduplicatedUplink.AppEUI = device.AppEUI
+	deduplicatedUplink.DevEUI = &device.DevEUI
+	deduplicatedUplink.AppEUI = &device.AppEUI
 	deduplicatedUplink.AppID = device.AppID
 	deduplicatedUplink.DevID = device.DevID
 	deduplicatedUplink.Trace = deduplicatedUplink.Trace.WithEvent(trace.CheckMICEvent, "mic checks", micChecks)
@@ -194,7 +200,7 @@ func (b *broker) HandleUplink(uplink *pb.UplinkMessage) (err error) {
 	// Collect GatewayMetadata and DownlinkOptions
 	var downlinkOptions []*pb.DownlinkOption
 	for _, duplicate := range duplicates {
-		deduplicatedUplink.GatewayMetadata = append(deduplicatedUplink.GatewayMetadata, duplicate.GatewayMetadata)
+		deduplicatedUplink.GatewayMetadata = append(deduplicatedUplink.GatewayMetadata, &duplicate.GatewayMetadata)
 		downlinkOptions = append(downlinkOptions, duplicate.DownlinkOptions...)
 	}
 

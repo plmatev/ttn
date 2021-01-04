@@ -10,9 +10,7 @@ import (
 	pb_broker "github.com/TheThingsNetwork/api/broker"
 	"github.com/TheThingsNetwork/api/broker/brokerclient"
 	pb "github.com/TheThingsNetwork/api/handler"
-	"github.com/TheThingsNetwork/api/monitor/monitorclient"
 	pb_lorawan "github.com/TheThingsNetwork/api/protocol/lorawan"
-	"github.com/TheThingsNetwork/go-utils/grpc/auth"
 	"github.com/TheThingsNetwork/ttn/amqp"
 	"github.com/TheThingsNetwork/ttn/core/component"
 	"github.com/TheThingsNetwork/ttn/core/handler/application"
@@ -29,6 +27,7 @@ type Handler interface {
 	component.ManagementInterface
 
 	WithMQTT(username, password string, brokers ...string) Handler
+	WithMQTTFields(enabled bool) Handler
 	WithAMQP(username, password, host, exchange string) Handler
 	WithDeviceAttributes(attribute ...string) Handler
 
@@ -37,6 +36,9 @@ type Handler interface {
 	HandleActivation(activation *pb_broker.DeduplicatedDeviceActivationRequest) (*pb.DeviceActivationResponse, error)
 	EnqueueDownlink(appDownlink *types.DownlinkMessage) error
 }
+
+// Timeout for publishing events to prevent blocking critical path.
+var eventPublishTimeout = 10 * time.Millisecond
 
 // NewRedisHandler creates a new Redis-backed Handler
 func NewRedisHandler(client *redis.Client, ttnBrokerID string) Handler {
@@ -63,13 +65,14 @@ type handler struct {
 
 	downlink chan *pb_broker.DownlinkMessage
 
-	mqttClient   mqtt.Client
-	mqttUsername string
-	mqttPassword string
-	mqttBrokers  []string
-	mqttEnabled  bool
-	mqttUp       chan *types.UplinkMessage
-	mqttEvent    chan *types.DeviceEvent
+	mqttClient        mqtt.Client
+	mqttUsername      string
+	mqttPassword      string
+	mqttBrokers       []string
+	mqttEnabled       bool
+	mqttFieldsEnabled bool
+	mqttUp            chan *types.UplinkMessage
+	mqttEvent         chan *types.DeviceEvent
 
 	amqpClient   amqp.Client
 	amqpUsername string
@@ -83,8 +86,8 @@ type handler struct {
 	qUp    chan *types.UplinkMessage
 	qEvent chan *types.DeviceEvent
 
-	status        *status
-	monitorStream monitorclient.Stream
+	status *status
+	// monitorStream monitorclient.Stream
 }
 
 var (
@@ -97,6 +100,11 @@ func (h *handler) WithMQTT(username, password string, brokers ...string) Handler
 	h.mqttPassword = password
 	h.mqttBrokers = brokers
 	h.mqttEnabled = true
+	return h
+}
+
+func (h *handler) WithMQTTFields(enabled bool) Handler {
+	h.mqttFieldsEnabled = enabled
 	return h
 }
 
@@ -172,14 +180,9 @@ func (h *handler) Init(c *component.Component) error {
 	}
 
 	h.Component.SetStatus(component.StatusHealthy)
-	if h.Component.Monitor != nil {
-		h.monitorStream = h.Component.Monitor.HandlerClient(h.Context, grpc.PerRPCCredentials(auth.WithStaticToken(h.AccessToken)))
-		go func() {
-			for range time.Tick(h.Component.Config.StatusInterval) {
-				h.monitorStream.Send(h.GetStatus())
-			}
-		}()
-	}
+	// if h.Component.Monitor != nil {
+	// 	h.monitorStream = h.Component.Monitor.HandlerClient(h.Context, grpc.PerRPCCredentials(auth.WithStaticToken(h.AccessToken)))
+	// }
 
 	return nil
 }

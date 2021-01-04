@@ -135,7 +135,7 @@ func (d *discoveryServer) AddMetadata(ctx context.Context, in *pb.MetadataReques
 	if err != nil {
 		return nil, err
 	}
-	err = d.discovery.AddMetadata(in.ServiceName, in.ID, in.Metadata)
+	err = d.discovery.AddMetadata(in.ServiceName, in.ID, &in.Metadata)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (d *discoveryServer) DeleteMetadata(ctx context.Context, in *pb.MetadataReq
 	if err != nil {
 		return nil, err
 	}
-	err = d.discovery.DeleteMetadata(in.ServiceName, in.ID, in.Metadata)
+	err = d.discovery.DeleteMetadata(in.ServiceName, in.ID, &in.Metadata)
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +181,7 @@ func (d *discoveryServer) GetByAppID(ctx context.Context, req *pb.GetByAppIDRequ
 	if err != nil {
 		return nil, err
 	}
+	service.Metadata = nil
 	return service, nil
 }
 
@@ -189,17 +190,19 @@ func (d *discoveryServer) GetByGatewayID(ctx context.Context, req *pb.GetByGatew
 	if err != nil {
 		return nil, err
 	}
+	service.Metadata = nil
 	return service, nil
 }
 
 func (d *discoveryServer) GetByAppEUI(ctx context.Context, req *pb.GetByAppEUIRequest) (*pb.Announcement, error) {
-	if req.AppEUI == nil {
+	if req.AppEUI.IsEmpty() {
 		return nil, errors.NewErrInvalidArgument("AppEUI", "empty")
 	}
-	service, err := d.discovery.GetByAppEUI(*req.AppEUI)
+	service, err := d.discovery.GetByAppEUI(req.AppEUI)
 	if err != nil {
 		return nil, err
 	}
+	service.Metadata = nil
 	return service, nil
 }
 

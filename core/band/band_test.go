@@ -12,6 +12,8 @@ import (
 func TestGuess(t *testing.T) {
 	a := New(t)
 
+	InitializeTables()
+
 	a.So(Guess(868100000), ShouldEqual, "EU_863_870")
 	a.So(Guess(903900000), ShouldEqual, "US_902_928")
 	a.So(Guess(779500000), ShouldEqual, "CN_779_787")
@@ -23,6 +25,7 @@ func TestGuess(t *testing.T) {
 	a.So(Guess(923600000), ShouldEqual, "AS_923_925")
 	a.So(Guess(922100000), ShouldEqual, "KR_920_923")
 	a.So(Guess(865062500), ShouldEqual, "IN_865_867")
+	a.So(Guess(868900000), ShouldEqual, "RU_864_870")
 
 	a.So(Guess(922100001), ShouldEqual, "") // Not allowed
 }
@@ -41,7 +44,7 @@ func TestGet(t *testing.T) {
 		fp, err := Get("US_902_928")
 		a.So(err, ShouldBeNil)
 		a.So(fp.CFList, ShouldBeNil)
-		a.So(fp.ADR, ShouldBeNil)
+		a.So(fp.ADR, ShouldNotBeNil)
 	}
 
 	{
@@ -62,7 +65,7 @@ func TestGet(t *testing.T) {
 		fp, err := Get("AU_915_928")
 		a.So(err, ShouldBeNil)
 		a.So(fp.CFList, ShouldBeNil)
-		a.So(fp.ADR, ShouldBeNil)
+		a.So(fp.ADR, ShouldNotBeNil)
 	}
 
 	{
@@ -76,28 +79,28 @@ func TestGet(t *testing.T) {
 		fp, err := Get("AS_923")
 		a.So(err, ShouldBeNil)
 		a.So(fp.CFList, ShouldBeNil)
-		a.So(fp.ADR, ShouldBeNil)
+		a.So(fp.ADR, ShouldNotBeNil)
 	}
 
 	{
 		fp, err := Get("AS_920_923")
 		a.So(err, ShouldBeNil)
 		a.So(fp.CFList, ShouldNotBeNil)
-		a.So(fp.ADR, ShouldBeNil)
+		a.So(fp.ADR, ShouldNotBeNil)
 	}
 
 	{
 		fp, err := Get("AS_923_925")
 		a.So(err, ShouldBeNil)
 		a.So(fp.CFList, ShouldNotBeNil)
-		a.So(fp.ADR, ShouldBeNil)
+		a.So(fp.ADR, ShouldNotBeNil)
 	}
 
 	{
 		fp, err := Get("KR_920_923")
 		a.So(err, ShouldBeNil)
 		a.So(fp.CFList, ShouldNotBeNil)
-		a.So(fp.ADR, ShouldBeNil)
+		a.So(fp.ADR, ShouldNotBeNil)
 	}
 
 	{
@@ -105,6 +108,13 @@ func TestGet(t *testing.T) {
 		a.So(err, ShouldBeNil)
 		a.So(fp.CFList, ShouldBeNil)
 		a.So(fp.ADR, ShouldBeNil)
+	}
+
+	{
+		fp, err := Get("RU_864_870")
+		a.So(err, ShouldBeNil)
+		a.So(fp.CFList, ShouldNotBeNil)
+		a.So(fp.ADR, ShouldNotBeNil)
 	}
 
 }
